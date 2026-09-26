@@ -39,6 +39,9 @@ class AbstractAccount(ABC):
     def status(self) -> AccountStatus:
         return self._status
 
+    def _set_status(self, status: AccountStatus) -> None:
+        self._status = self._validate_status(status)
+
     @staticmethod
     def _validate_owner(owner: str) -> str:
         if not isinstance(owner, str) or not owner.strip():
