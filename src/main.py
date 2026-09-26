@@ -6,6 +6,8 @@ from src.accounts.bank_account import BankAccount
 from src.accounts.investment_account import InvestmentAccount
 from src.accounts.premium_account import PremiumAccount
 from src.accounts.savings_account import SavingsAccount
+from src.audit.audit_log import AuditLog
+from src.audit.audit_report import AuditReport
 from src.banks.bank import Bank
 from src.clients.client import Client
 from src.enums.asset_type import AssetType
@@ -14,6 +16,7 @@ from src.enums.transaction_priority import TransactionPriority
 from src.enums.transaction_status import TransactionStatus
 from src.enums.transaction_type import TransactionType
 from src.exceptions import InvalidOperationError
+from src.risk.risk_analyzer import RiskAnalyzer
 from src.transactions.transaction import Transaction
 from src.transactions.transaction_processor import TransactionProcessor
 from src.transactions.transaction_queue import TransactionQueue
@@ -442,6 +445,209 @@ def demonstrate_night_restriction() -> None:
 
     print(night_bank.suspicious_actions)
 
+def create_audit_transaction(
+    transaction_id: str,
+    sender: AbstractAccount,
+    recipient: AbstractAccount,
+    amount: Decimal,
+    created_at: datetime,
+) -> Transaction:
+    return Transaction(
+        transaction_type=TransactionType.INTERNAL_TRANSFER,
+        amount=amount,
+        currency=sender.currency,
+        sender=sender,
+        recipient=recipient,
+        transaction_id=transaction_id,
+        created_at=created_at,
+    )
+
+def demonstrate_audit_and_risk() -> None:
+    clock = MutableClock(
+        datetime(2026, 9, 27, 12, 0)
+    )
+    audit_log = AuditLog(
+        file_path="logs/audit.jsonl",
+        time_provider=clock,
+    )
+    risk_analyzer = RiskAnalyzer(
+        large_amount_threshold=Decimal("10000"),
+        frequent_operations_limit=3,
+        time_provider=clock,
+    )
+    bank = Bank(
+        time_provider=clock,
+        audit_log=audit_log,
+        risk_analyzer=risk_analyzer,
+    )
+    processor = TransactionProcessor(
+        time_provider=clock
+    )
+
+    sender_client = Client(
+        full_name="Клиент аудита",
+        client_id="audit-client-001",
+        age=30,
+        contacts={"phone": "+79990000101"},
+    )
+    first_recipient_client = Client(
+        full_name="Первый получатель",
+        client_id="audit-client-002",
+        age=28,
+        contacts={"phone": "+79990000102"},
+    )
+    second_recipient_client = Client(
+        full_name="Второй получатель",
+        client_id="audit-client-003",
+        age=35,
+        contacts={"phone": "+79990000103"},
+    )
+
+    sender = BankAccount(
+        owner=sender_client.full_name,
+        balance=Decimal("50000"),
+        currency=Currency.RUB,
+        account_id="audit-sender-001",
+    )
+    first_recipient = BankAccount(
+        owner=first_recipient_client.full_name,
+        balance=Decimal("1000"),
+        currency=Currency.RUB,
+        account_id="audit-recipient-001",
+    )
+    second_recipient = BankAccount(
+        owner=second_recipient_client.full_name,
+        balance=Decimal("1000"),
+        currency=Currency.RUB,
+        account_id="audit-recipient-002",
+    )
+
+    bank.add_client(
+        sender_client,
+        "sender-password",
+    )
+    bank.add_client(
+        first_recipient_client,
+        "first-recipient-password",
+    )
+    bank.add_client(
+        second_recipient_client,
+        "second-recipient-password",
+    )
+    bank.open_account(
+        sender_client.client_id,
+        sender,
+    )
+    bank.open_account(
+        first_recipient_client.client_id,
+        first_recipient,
+    )
+    bank.open_account(
+        second_recipient_client.client_id,
+        second_recipient,
+    )
+
+    transactions = [
+        create_audit_transaction(
+            transaction_id="audit-transaction-001",
+            sender=sender,
+            recipient=first_recipient,
+            amount=Decimal("100"),
+            created_at=clock.current_time,
+        ),
+        create_audit_transaction(
+            transaction_id="audit-transaction-002",
+            sender=sender,
+            recipient=first_recipient,
+            amount=Decimal("100"),
+            created_at=clock.current_time,
+        ),
+        create_audit_transaction(
+            transaction_id="audit-transaction-003",
+            sender=sender,
+            recipient=first_recipient,
+            amount=Decimal("100"),
+            created_at=clock.current_time,
+        ),
+        create_audit_transaction(
+            transaction_id="audit-transaction-004",
+            sender=sender,
+            recipient=second_recipient,
+            amount=Decimal("10000"),
+            created_at=clock.current_time,
+        ),
+    ]
+
+    results = []
+
+    for transaction in transactions:
+        result = bank.process_transaction(
+            transaction,
+            processor,
+        )
+        results.append((transaction, result))
+
+    clock.current_time = datetime(2026, 9, 28, 2, 0)
+
+    night_transaction = create_audit_transaction(
+        transaction_id="audit-transaction-005",
+        sender=sender,
+        recipient=second_recipient,
+        amount=Decimal("100"),
+        created_at=clock.current_time,
+    )
+    night_result = bank.process_transaction(
+        night_transaction,
+        processor,
+    )
+    results.append((night_transaction, night_result))
+
+    print("\nАудит и анализ рисков:")
+
+    for transaction, result in results:
+        print(
+            f"{transaction.transaction_id} | "
+            f"Выполнена: {result} | "
+            f"Статус: {transaction.status.value} | "
+            f"Причина: {transaction.failure_reason}"
+        )
+
+    print("\nБаланс после риск-проверок:")
+    print(f"Отправитель: {sender.balance:.2f} RUB")
+    print(
+        "Первый получатель:",
+        f"{first_recipient.balance:.2f} RUB",
+    )
+    print(
+        "Второй получатель:",
+        f"{second_recipient.balance:.2f} RUB",
+    )
+
+    report = AuditReport(audit_log)
+    suspicious_operations = (
+        report.get_suspicious_operations()
+    )
+    client_profile = report.get_client_risk_profile(
+        sender_client.client_id
+    )
+    error_statistics = report.get_error_statistics()
+
+    print("\nПодозрительные транзакции:")
+
+    for entry in suspicious_operations:
+        print(
+            entry["transaction_id"],
+            entry["details"],
+        )
+
+    print("\nРиск-профиль клиента:")
+    print(client_profile)
+
+    print("\nСтатистика ошибок:")
+    print(error_statistics)
+
+    print("\nФайл аудита: logs/audit.jsonl")
+
 def main() -> None:
     clock = MutableClock(
         datetime(2026, 9, 26, 12, 0)
@@ -493,6 +699,7 @@ def main() -> None:
     display_analytics(bank)
     display_suspicious_actions(bank)
     demonstrate_night_restriction()
+    demonstrate_audit_and_risk()
 
 
 if __name__ == "__main__":

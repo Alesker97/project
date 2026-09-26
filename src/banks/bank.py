@@ -3,30 +3,67 @@ from datetime import datetime
 from decimal import Decimal
 
 from src.accounts.bank_account import BankAccount
+from src.audit.audit_log import AuditLog
 from src.clients.client import Client
 from src.enums.account_status import AccountStatus
+from src.enums.audit_level import AuditLevel
 from src.enums.client_status import ClientStatus
 from src.enums.currency import Currency
+from src.enums.risk_level import RiskLevel
+from src.enums.transaction_status import TransactionStatus
 from src.exceptions import InvalidOperationError
+from src.risk.risk_analyzer import RiskAnalyzer
+from src.transactions.transaction import Transaction
+from src.transactions.transaction_processor import TransactionProcessor
 
 
 class Bank:
     def __init__(
         self,
         time_provider: Callable[[], datetime] | None = None,
+        audit_log: AuditLog | None = None,
+        risk_analyzer: RiskAnalyzer | None = None,
     ) -> None:
         if time_provider is not None and not callable(time_provider):
             raise InvalidOperationError(
                 "Источник времени должен быть вызываемым объектом."
             )
+        if audit_log is not None and not isinstance(
+            audit_log,
+            AuditLog,
+        ):
+            raise InvalidOperationError(
+                "Передан некорректный журнал аудита."
+            )
+        if risk_analyzer is not None and not isinstance(
+            risk_analyzer,
+            RiskAnalyzer,
+        ):
+            raise InvalidOperationError(
+                "Передан некорректный анализатор риска."
+            )
 
         self._time_provider = time_provider or datetime.now
+        self._audit_log = (
+            audit_log
+            if audit_log is not None
+            else AuditLog(time_provider=self._time_provider)
+        )
+        self._risk_analyzer = (
+            risk_analyzer
+            if risk_analyzer is not None
+            else RiskAnalyzer(time_provider=self._time_provider)
+        )
         self._clients: dict[str, Client] = {}
         self._accounts: dict[str, BankAccount] = {}
         self._account_owners: dict[str, str] = {}
         self._credentials: dict[str, str] = {}
         self._failed_attempts: dict[str, int] = {}
         self._suspicious_actions: list[dict[str, object]] = []
+
+    @property
+    def audit_log(self) -> AuditLog:
+        return self._audit_log
 
     @property
     def suspicious_actions(self) -> list[dict[str, object]]:
@@ -273,6 +310,155 @@ class Bank:
             key=lambda item: (-item[1], item[0].client_id),
         )
 
+    def process_transaction(
+        self,
+        transaction: Transaction,
+        processor: TransactionProcessor,
+    ) -> bool:
+        if not isinstance(transaction, Transaction):
+            raise InvalidOperationError(
+                "Передан некорректный объект транзакции."
+            )
+        if not isinstance(processor, TransactionProcessor):
+            raise InvalidOperationError(
+                "Передан некорректный обработчик транзакций."
+            )
+        if transaction.status is not TransactionStatus.PENDING:
+            raise InvalidOperationError(
+                "Банк может обработать только ожидающую транзакцию."
+            )
+
+        sender_account_id = transaction.sender.account_id
+        registered_sender = self._accounts.get(sender_account_id)
+
+        if registered_sender is not transaction.sender:
+            raise InvalidOperationError(
+                "Счёт отправителя не зарегистрирован в банке."
+            )
+
+        client_id = self._account_owners[sender_account_id]
+        self._get_active_client(client_id)
+
+        self._audit_log.log(
+            level=AuditLevel.INFO,
+            event_type="transaction_requested",
+            message="Получен запрос на выполнение транзакции.",
+            client_id=client_id,
+            transaction_id=transaction.transaction_id,
+            details={
+                "amount": transaction.amount,
+                "currency": transaction.currency,
+                "sender_account_id": sender_account_id,
+                "recipient_account_id": (
+                    transaction.recipient.account_id
+                ),
+                "transaction_type": transaction.transaction_type,
+            },
+        )
+
+        risk_result = self._risk_analyzer.analyze(
+            transaction,
+            client_id,
+            self._audit_log,
+        )
+        risk_level = risk_result.get("risk_level")
+        reasons = risk_result.get("reasons")
+
+        if (
+            not isinstance(risk_level, RiskLevel)
+            or not isinstance(reasons, list)
+            or not all(
+                isinstance(reason, str)
+                for reason in reasons
+            )
+        ):
+            raise InvalidOperationError(
+                "Анализатор риска вернул некорректный результат."
+            )
+
+        self._audit_log.log(
+            level=self._get_risk_audit_level(risk_level),
+            event_type="risk_assessment",
+            message="Выполнена оценка риска транзакции.",
+            client_id=client_id,
+            transaction_id=transaction.transaction_id,
+            details={
+                "risk_level": risk_level,
+                "reasons": reasons,
+                "amount": transaction.amount,
+                "currency": transaction.currency,
+                "recipient_account_id": (
+                    transaction.recipient.account_id
+                ),
+            },
+        )
+
+        if risk_level is RiskLevel.HIGH:
+            failure_reason = (
+                "Операция заблокирована банком: "
+                "высокий уровень риска."
+            )
+            transaction._mark_failed(
+                failure_reason,
+                self._get_current_time(),
+            )
+            self._audit_log.log(
+                level=AuditLevel.CRITICAL,
+                event_type="transaction_blocked",
+                message=failure_reason,
+                client_id=client_id,
+                transaction_id=transaction.transaction_id,
+                details={
+                    "risk_level": risk_level,
+                    "reasons": reasons,
+                    "amount": transaction.amount,
+                    "currency": transaction.currency,
+                    "recipient_account_id": (
+                        transaction.recipient.account_id
+                    ),
+                },
+            )
+            return False
+
+        result = processor.process(transaction)
+
+        if result:
+            self._audit_log.log(
+                level=AuditLevel.INFO,
+                event_type="transaction_completed",
+                message="Транзакция успешно выполнена.",
+                client_id=client_id,
+                transaction_id=transaction.transaction_id,
+                details={
+                    "amount": transaction.amount,
+                    "commission": transaction.commission,
+                    "currency": transaction.currency,
+                    "recipient_account_id": (
+                        transaction.recipient.account_id
+                    ),
+                    "risk_level": risk_level,
+                },
+            )
+            return True
+
+        self._audit_log.log(
+            level=AuditLevel.ERROR,
+            event_type="transaction_failed",
+            message="Транзакция завершена с ошибкой.",
+            client_id=client_id,
+            transaction_id=transaction.transaction_id,
+            details={
+                "amount": transaction.amount,
+                "currency": transaction.currency,
+                "recipient_account_id": (
+                    transaction.recipient.account_id
+                ),
+                "risk_level": risk_level,
+                "failure_reason": transaction.failure_reason,
+            },
+        )
+        return False
+
     def _get_client(self, client_id: str) -> Client:
         if not isinstance(client_id, str) or not client_id.strip():
             raise InvalidOperationError(
@@ -315,6 +501,27 @@ class Bank:
 
         return account
 
+    @staticmethod
+    def _get_risk_audit_level(
+        risk_level: RiskLevel,
+    ) -> AuditLevel:
+        levels = {
+            RiskLevel.LOW: AuditLevel.INFO,
+            RiskLevel.MEDIUM: AuditLevel.WARNING,
+            RiskLevel.HIGH: AuditLevel.CRITICAL,
+        }
+        return levels[risk_level]
+
+    def _get_current_time(self) -> datetime:
+        current_time = self._time_provider()
+
+        if not isinstance(current_time, datetime):
+            raise InvalidOperationError(
+                "Источник времени должен возвращать datetime."
+            )
+
+        return current_time
+
     def _ensure_account_owner(
         self,
         client_id: str,
@@ -330,7 +537,7 @@ class Bank:
         client_id: str,
         action: str,
     ) -> None:
-        current_datetime = self._time_provider()
+        current_datetime = self._get_current_time()
 
         if 0 <= current_datetime.hour < 5:
             self._record_suspicious_action(
@@ -352,6 +559,6 @@ class Bank:
             {
                 "client_id": client_id,
                 "action": action,
-                "timestamp": timestamp or self._time_provider(),
+                "timestamp": timestamp or self._get_current_time(),
             }
         )
