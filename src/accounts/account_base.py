@@ -34,6 +34,9 @@ class AbstractAccount(ABC):
     @property
     def balance(self) -> Decimal:
         return self._balance
+    
+    def _restore_balance(self, balance: Decimal) -> None:
+        self._balance = balance
 
     @property
     def status(self) -> AccountStatus:

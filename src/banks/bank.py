@@ -393,6 +393,41 @@ class Bank:
             },
         )
 
+        current_datetime = self._get_current_time()
+
+        if self._is_night_time(current_datetime):
+            failure_reason = (
+                "Переводы запрещены с 00:00 до 05:00."
+            )
+            transaction._mark_failed(
+                failure_reason,
+                current_datetime,
+            )
+            self._record_suspicious_action(
+                client_id,
+                "night_transaction",
+                current_datetime,
+            )
+            self._audit_log.log(
+                level=AuditLevel.CRITICAL,
+                event_type="transaction_blocked",
+                message=failure_reason,
+                client_id=client_id,
+                transaction_id=transaction.transaction_id,
+                details={
+                    "risk_level": risk_level,
+                    "reasons": reasons,
+                    "block_reason": "night_operation",
+                    "amount": transaction.amount,
+                    "currency": transaction.currency,
+                    "recipient_account_id": (
+                        transaction.recipient.account_id
+                    ),
+                },
+                timestamp=current_datetime,
+            )
+            return False
+
         if risk_level is RiskLevel.HIGH:
             failure_reason = (
                 "Операция заблокирована банком: "
@@ -522,6 +557,10 @@ class Bank:
 
         return current_time
 
+    @staticmethod
+    def _is_night_time(current_datetime: datetime) -> bool:
+        return 0 <= current_datetime.hour < 5
+    
     def _ensure_account_owner(
         self,
         client_id: str,
@@ -539,7 +578,7 @@ class Bank:
     ) -> None:
         current_datetime = self._get_current_time()
 
-        if 0 <= current_datetime.hour < 5:
+        if self._is_night_time(current_datetime):
             self._record_suspicious_action(
                 client_id,
                 f"night_{action}",

@@ -25,6 +25,15 @@ from src.transactions.transaction_processor import TransactionProcessor
 
 CURRENT_TIME = datetime(2026, 9, 26, 12, 0)
 
+
+class MutableClock:
+    def __init__(self, current_time: datetime) -> None:
+        self.current_time = current_time
+
+    def __call__(self) -> datetime:
+        return self.current_time
+
+
 def create_client(
     client_id: str = "client-001",
     full_name: str = "Алексей Иванов",
@@ -35,6 +44,7 @@ def create_client(
         age=30,
         contacts={"phone": "+994501234567"},
     )
+
 
 def create_account(
     owner: str = "Алексей Иванов",
@@ -49,11 +59,13 @@ def create_account(
         account_id=account_id,
     )
 
+
 def create_transaction(
     sender: BankAccount,
     recipient: BankAccount,
     amount: Decimal | int | float = 100,
     transaction_id: str = "transaction-001",
+    created_at: datetime = CURRENT_TIME,
 ) -> Transaction:
     return Transaction(
         transaction_type=TransactionType.INTERNAL_TRANSFER,
@@ -62,8 +74,9 @@ def create_transaction(
         sender=sender,
         recipient=recipient,
         transaction_id=transaction_id,
-        created_at=CURRENT_TIME,
+        created_at=created_at,
     )
+
 
 def create_transaction_bank(
     sender_balance: Decimal | int | float = 20000,
@@ -115,6 +128,7 @@ def create_transaction_bank(
 
     return bank, audit_log, processor, sender, recipient
 
+
 @pytest.fixture
 def bank() -> Bank:
     return Bank(
@@ -127,6 +141,7 @@ def bank() -> Bank:
         )
     )
 
+
 def test_add_client_and_authenticate(bank: Bank) -> None:
     client = create_client()
 
@@ -137,11 +152,13 @@ def test_add_client_and_authenticate(bank: Bank) -> None:
         "password",
     ) is True
 
+
 def test_duplicate_client_id_is_rejected(bank: Bank) -> None:
     bank.add_client(create_client(), "password")
 
     with pytest.raises(InvalidOperationError):
         bank.add_client(create_client(), "another-password")
+
 
 @pytest.mark.parametrize(
     "password",
@@ -159,6 +176,7 @@ def test_invalid_password_is_rejected(
     with pytest.raises(InvalidOperationError):
         bank.add_client(create_client(), password)
 
+
 def test_open_account(bank: Bank) -> None:
     client = create_client()
     account = create_account()
@@ -171,6 +189,7 @@ def test_open_account(bank: Bank) -> None:
     assert bank.search_accounts(
         client_id=client.client_id
     ) == [account]
+
 
 def test_open_different_account_types(bank: Bank) -> None:
     client = create_client()
@@ -213,6 +232,7 @@ def test_open_different_account_types(bank: Bank) -> None:
         client_id=client.client_id
     ) == accounts
 
+
 def test_account_owner_must_match_client(bank: Bank) -> None:
     client = create_client()
     account = create_account(owner="Другой владелец")
@@ -223,6 +243,7 @@ def test_account_owner_must_match_client(bank: Bank) -> None:
         bank.open_account(client.client_id, account)
 
     assert client.account_ids == []
+
 
 def test_duplicate_account_id_is_rejected(bank: Bank) -> None:
     first_client = create_client()
@@ -245,6 +266,7 @@ def test_duplicate_account_id_is_rejected(bank: Bank) -> None:
             create_account(owner=second_client.full_name),
         )
 
+
 def test_close_account(bank: Bank) -> None:
     client = create_client()
     account = create_account()
@@ -255,6 +277,7 @@ def test_close_account(bank: Bank) -> None:
 
     assert account.status is AccountStatus.CLOSED
     assert client.account_ids == ["account-001"]
+
 
 def test_client_cannot_close_another_clients_account(
     bank: Bank,
@@ -278,6 +301,7 @@ def test_client_cannot_close_another_clients_account(
 
     assert account.status is AccountStatus.ACTIVE
 
+
 def test_freeze_and_unfreeze_account(bank: Bank) -> None:
     client = create_client()
     account = create_account()
@@ -290,6 +314,7 @@ def test_freeze_and_unfreeze_account(bank: Bank) -> None:
 
     bank.unfreeze_account(account.account_id)
     assert account.status is AccountStatus.ACTIVE
+
 
 def test_closed_account_cannot_be_frozen_or_unfrozen(
     bank: Bank,
@@ -308,6 +333,7 @@ def test_closed_account_cannot_be_frozen_or_unfrozen(
         bank.unfreeze_account(account.account_id)
 
     assert account.status is AccountStatus.CLOSED
+
 
 def test_three_failed_attempts_block_client(bank: Bank) -> None:
     client = create_client()
@@ -333,6 +359,7 @@ def test_three_failed_attempts_block_client(bank: Bank) -> None:
     ) is False
     assert len(bank.suspicious_actions) == 3
 
+
 def test_successful_authentication_resets_attempts(
     bank: Bank,
 ) -> None:
@@ -356,6 +383,7 @@ def test_successful_authentication_resets_attempts(
         "password",
     ) is True
 
+
 def test_failed_authentication_is_suspicious(
     bank: Bank,
 ) -> None:
@@ -377,6 +405,7 @@ def test_failed_authentication_is_suspicious(
             ),
         }
     ]
+
 
 def test_night_operation_is_rejected() -> None:
     bank = Bank(
@@ -412,6 +441,7 @@ def test_night_operation_is_rejected() -> None:
         }
     ]
 
+
 def test_operation_at_five_is_allowed() -> None:
     bank = Bank(
         time_provider=lambda: datetime(
@@ -429,6 +459,7 @@ def test_operation_at_five_is_allowed() -> None:
     bank.open_account(client.client_id, account)
 
     assert client.account_ids == ["account-001"]
+
 
 def test_search_accounts(bank: Bank) -> None:
     first_client = create_client()
@@ -478,6 +509,7 @@ def test_search_accounts(bank: Bank) -> None:
         currency=Currency.RUB,
     ) == [third_account]
 
+
 def test_get_total_balance(bank: Bank) -> None:
     client = create_client()
     rub_account = create_account(
@@ -514,6 +546,7 @@ def test_get_total_balance(bank: Bank) -> None:
         Currency.KZT: Decimal("0"),
         Currency.CNY: Decimal("0"),
     }
+
 
 def test_get_clients_ranking(bank: Bank) -> None:
     first_client = create_client()
@@ -563,6 +596,7 @@ def test_get_clients_ranking(bank: Bank) -> None:
         (third_client, Decimal("0")),
     ]
 
+
 def test_process_medium_risk_transaction() -> None:
     bank, audit_log, processor, sender, recipient = (
         create_transaction_bank()
@@ -600,6 +634,7 @@ def test_process_medium_risk_transaction() -> None:
         "risk_assessment",
         "transaction_completed",
     ]
+
 
 def test_process_low_risk_transaction() -> None:
     bank, audit_log, processor, sender, recipient = (
@@ -640,6 +675,7 @@ def test_process_low_risk_transaction() -> None:
     assert details["risk_level"] is RiskLevel.LOW
     assert details["reasons"] == []
 
+
 def test_block_high_risk_transaction() -> None:
     bank, audit_log, processor, sender, recipient = (
         create_transaction_bank()
@@ -677,6 +713,7 @@ def test_block_high_risk_transaction() -> None:
         "large_amount",
         "new_recipient",
     ]
+
 
 def test_record_failed_transaction_in_audit() -> None:
     bank, audit_log, processor, sender, recipient = (
@@ -721,6 +758,7 @@ def test_record_failed_transaction_in_audit() -> None:
         transaction.failure_reason
     )
 
+
 def test_reject_unregistered_sender_account() -> None:
     bank, audit_log, processor, sender, recipient = (
         create_transaction_bank()
@@ -744,6 +782,7 @@ def test_reject_unregistered_sender_account() -> None:
     assert transaction.status is TransactionStatus.PENDING
     assert audit_log.entries == []
 
+
 def test_reject_invalid_transaction_processing_objects(
     bank: Bank,
 ) -> None:
@@ -752,3 +791,103 @@ def test_reject_invalid_transaction_processing_objects(
             "incorrect",
             "incorrect",
         )
+
+
+def test_bank_blocks_medium_risk_night_transfer() -> None:
+    clock = MutableClock(CURRENT_TIME)
+    audit_log = AuditLog(time_provider=clock)
+    risk_analyzer = RiskAnalyzer(time_provider=clock)
+    bank = Bank(
+        time_provider=clock,
+        audit_log=audit_log,
+        risk_analyzer=risk_analyzer,
+    )
+    processor = TransactionProcessor(
+        time_provider=clock
+    )
+    sender_client = create_client(
+        client_id="night-client-001",
+        full_name="Ночной отправитель",
+    )
+    recipient_client = create_client(
+        client_id="night-client-002",
+        full_name="Ночной получатель",
+    )
+    sender = create_account(
+        owner=sender_client.full_name,
+        account_id="night-sender-001",
+        balance=1000,
+    )
+    recipient = create_account(
+        owner=recipient_client.full_name,
+        account_id="night-recipient-001",
+        balance=500,
+    )
+
+    bank.add_client(sender_client, "sender-password")
+    bank.add_client(recipient_client, "recipient-password")
+    bank.open_account(sender_client.client_id, sender)
+    bank.open_account(recipient_client.client_id, recipient)
+
+    first_transaction = create_transaction(
+        sender,
+        recipient,
+        transaction_id="day-transfer",
+    )
+
+    assert bank.process_transaction(
+        first_transaction,
+        processor,
+    ) is True
+
+    assert sender.balance == Decimal("900")
+    assert recipient.balance == Decimal("600")
+
+    night_time = datetime(2026, 9, 28, 2, 0)
+    clock.current_time = night_time
+
+    night_transaction = create_transaction(
+        sender,
+        recipient,
+        transaction_id="night-transfer",
+        created_at=night_time,
+    )
+
+    result = bank.process_transaction(
+        night_transaction,
+        processor,
+    )
+
+    assert result is False
+    assert sender.balance == Decimal("900")
+    assert recipient.balance == Decimal("600")
+    assert night_transaction.status is TransactionStatus.FAILED
+    assert night_transaction.attempts == 0
+    assert night_transaction.failure_reason == (
+        "Переводы запрещены с 00:00 до 05:00."
+    )
+
+    risk_entries = audit_log.filter(
+        event_type="risk_assessment",
+        transaction_id=night_transaction.transaction_id,
+    )
+    risk_details = risk_entries[0]["details"]
+
+    assert isinstance(risk_details, dict)
+    assert risk_details["risk_level"] is RiskLevel.MEDIUM
+    assert risk_details["reasons"] == ["night_operation"]
+
+    blocked_entries = audit_log.filter(
+        event_type="transaction_blocked",
+        transaction_id=night_transaction.transaction_id,
+    )
+    blocked_details = blocked_entries[0]["details"]
+
+    assert len(blocked_entries) == 1
+    assert isinstance(blocked_details, dict)
+    assert blocked_details["block_reason"] == "night_operation"
+    assert bank.suspicious_actions[-1] == {
+        "client_id": sender_client.client_id,
+        "action": "night_transaction",
+        "timestamp": night_time,
+    }

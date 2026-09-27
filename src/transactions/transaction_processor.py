@@ -78,6 +78,8 @@ class TransactionProcessor:
 
         for attempt in range(self._max_retries + 1):
             transaction._increment_attempts()
+            sender_balance = transaction.sender.balance
+            recipient_balance = transaction.recipient.balance
 
             try:
                 self._execute_transaction(transaction)
@@ -87,6 +89,11 @@ class TransactionProcessor:
                 InsufficientFundsError,
                 InvalidOperationError,
             ) as error:
+                self._rollback_balances(
+                    transaction,
+                    sender_balance,
+                    recipient_balance,
+                )
                 self._record_error(transaction, error)
                 transaction._mark_failed(
                     str(error),
@@ -94,6 +101,11 @@ class TransactionProcessor:
                 )
                 return False
             except Exception as error:
+                self._rollback_balances(
+                    transaction,
+                    sender_balance,
+                    recipient_balance,
+                )
                 self._record_error(transaction, error)
 
                 if attempt == self._max_retries:
@@ -142,6 +154,7 @@ class TransactionProcessor:
         self,
         transaction: Transaction,
     ) -> None:
+        self._validate_operation_time()
         self._validate_accounts(transaction)
         self._validate_transaction_currency(transaction)
 
@@ -155,6 +168,23 @@ class TransactionProcessor:
             transaction.amount + commission
         )
         transaction.recipient.deposit(recipient_amount)
+
+    @staticmethod
+    def _rollback_balances(
+        transaction: Transaction,
+        sender_balance: Decimal,
+        recipient_balance: Decimal,
+    ) -> None:
+        transaction.sender._restore_balance(sender_balance)
+        transaction.recipient._restore_balance(recipient_balance)
+
+    def _validate_operation_time(self) -> None:
+        current_time = self._get_current_time()
+
+        if 0 <= current_time.hour < 5:
+            raise InvalidOperationError(
+                "Переводы запрещены с 00:00 до 05:00."
+            )
 
     def _validate_accounts(
         self,
