@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from src.reports.report_builder import ReportBuilder
 from src.audit.audit_report import AuditReport
 from src.demo.demo_builder import (
     AUDIT_FILE_PATH,
@@ -59,7 +62,10 @@ class DemoRunner:
         self.queue_log: list[dict[str, object]] = []
         self.processing_log: list[dict[str, object]] = []
 
-    def run(self) -> None:
+    def run(
+        self,
+        output_dir: str | Path = "output",
+    ) -> None:
         self.display_initialization()
 
         self.queue_log = prepare_demo_queue(
@@ -106,6 +112,115 @@ class DemoRunner:
         )
         self.display_suspicious_actions()
         self.display_audit_file()
+
+        generated_files = self.generate_reports(
+            output_dir
+        )
+        self.display_generated_files(
+            generated_files
+        )
+    
+    def generate_reports(
+        self,
+        output_dir: str | Path,
+    ) -> dict[str, Path]:
+        directory = Path(output_dir)
+        reports_directory = directory / "reports"
+        charts_directory = directory / "charts"
+
+        report_builder = ReportBuilder(
+            bank=self.bank,
+            clients=self.clients,
+            transactions=self.transactions,
+            audit_report=self.audit_report,
+            processing_log=self.processing_log,
+        )
+
+        client_report = (
+            report_builder.build_client_report(
+                self.clients["alexey"],
+            )
+        )
+        bank_report = (
+            report_builder.build_bank_report()
+        )
+        risk_report = (
+            report_builder.build_risk_report()
+        )
+
+        print("\nТекстовый отчёт по клиенту:")
+        print(
+            report_builder.build_text_report(
+                client_report
+            )
+        )
+
+        generated_files = {
+            "client_json": (
+                report_builder.export_to_json(
+                    client_report,
+                    reports_directory
+                    / "client_report.json",
+                )
+            ),
+            "client_csv": (
+                report_builder.export_to_csv(
+                    client_report,
+                    reports_directory
+                    / "client_report.csv",
+                )
+            ),
+            "bank_json": (
+                report_builder.export_to_json(
+                    bank_report,
+                    reports_directory
+                    / "bank_report.json",
+                )
+            ),
+            "bank_csv": (
+                report_builder.export_to_csv(
+                    bank_report,
+                    reports_directory
+                    / "bank_report.csv",
+                )
+            ),
+            "risk_json": (
+                report_builder.export_to_json(
+                    risk_report,
+                    reports_directory
+                    / "risk_report.json",
+                )
+            ),
+            "risk_csv": (
+                report_builder.export_to_csv(
+                    risk_report,
+                    reports_directory
+                    / "risk_report.csv",
+                )
+            ),
+        }
+
+        chart_paths = report_builder.save_charts(
+            output_dir=charts_directory,
+            account_id="demo-acc-0001",
+            currency=Currency.RUB,
+        )
+        generated_files.update(chart_paths)
+
+        return generated_files
+
+    @staticmethod
+    def display_generated_files(
+        generated_files: dict[str, Path],
+    ) -> None:
+        print("\nСозданные файлы отчётности:")
+
+        for file_type, file_path in (
+            generated_files.items()
+        ):
+            print(
+                f"{file_type}: {file_path}"
+            )
 
     def display_initialization(self) -> None:
         print("Комплексная демонстрация банковской системы")

@@ -339,3 +339,46 @@ def test_high_priority_transactions_are_processed_first(
         "demo-tx-023",
         "demo-tx-024",
     ]
+
+
+def test_processing_log_contains_balance_snapshots(
+) -> None:
+    clock = MutableClock(DEMO_START_TIME)
+    clients = create_demo_clients()
+    bank, _, _ = create_demo_bank(clock, clients)
+    accounts = create_demo_accounts(clients)
+    register_demo_accounts(bank, clients, accounts)
+    transactions = create_demo_transactions(accounts)
+    queue = create_demo_queue(clock)
+    processor = create_demo_processor(clock)
+
+    prepare_demo_queue(queue, transactions)
+    processing_log = run_transaction_simulation(
+        clock,
+        queue,
+        bank,
+        processor,
+    )
+
+    first_entry = processing_log[0]
+    first_transaction = transactions[0]
+    
+    assert first_entry["status"] == (
+        TransactionStatus.COMPLETED.value
+    )
+
+    assert first_entry["sender_account_id"] == (
+        first_transaction.sender.account_id
+    )
+    assert first_entry["recipient_account_id"] == (
+        first_transaction.recipient.account_id
+    )
+    assert (
+        first_entry["sender_balance_after"]
+        < first_entry["sender_balance_before"]
+    )
+    assert (
+        first_entry["recipient_balance_after"]
+        > first_entry["recipient_balance_before"]
+    )
+    assert first_entry["processed_at"] == DEMO_START_TIME
