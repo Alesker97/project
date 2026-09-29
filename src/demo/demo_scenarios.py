@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from src.banks.bank import Bank
 from src.demo.demo_builder import (
     DEMO_DELAYED_TIME,
@@ -160,41 +162,64 @@ def process_available_transactions(
     queue: TransactionQueue,
     bank: Bank,
     processor: TransactionProcessor,
+    processed_at: datetime,
 ) -> list[dict[str, object]]:
-    processing_log: list[dict[str, object]] = []
+    processing_log = []
 
-    while True:
+    while len(queue) > 0:
         transaction = queue.get_next()
 
         if transaction is None:
             break
 
-        frozen_account_id = prepare_account_status(
+        sender_balance_before = transaction.sender.balance
+        recipient_balance_before = transaction.recipient.balance
+
+        changed_account_id = prepare_account_status(
             bank,
             transaction,
         )
 
         try:
-            result = bank.process_transaction(
+            completed = bank.process_transaction(
                 transaction,
                 processor,
             )
         finally:
             restore_account_status(
                 bank,
-                frozen_account_id,
+                changed_account_id,
             )
 
         processing_log.append(
             {
                 "event_type": get_processing_event_type(
                     transaction,
-                    result,
+                    completed,
                 ),
                 "transaction_id": transaction.transaction_id,
                 "status": transaction.status.value,
                 "attempts": transaction.attempts,
                 "failure_reason": transaction.failure_reason,
+                "sender_account_id": (
+                    transaction.sender.account_id
+                ),
+                "recipient_account_id": (
+                    transaction.recipient.account_id
+                ),
+                "sender_balance_before": (
+                    sender_balance_before
+                ),
+                "sender_balance_after": (
+                    transaction.sender.balance
+                ),
+                "recipient_balance_before": (
+                    recipient_balance_before
+                ),
+                "recipient_balance_after": (
+                    transaction.recipient.balance
+                ),
+                "processed_at": processed_at,
             }
         )
 
@@ -207,7 +232,7 @@ def run_transaction_simulation(
     bank: Bank,
     processor: TransactionProcessor,
 ) -> list[dict[str, object]]:
-    processing_log: list[dict[str, object]] = []
+    processing_log = []
 
     clock.current_time = DEMO_START_TIME
     processing_log.extend(
@@ -215,6 +240,7 @@ def run_transaction_simulation(
             queue,
             bank,
             processor,
+            processed_at=clock.current_time,
         )
     )
 
@@ -224,6 +250,7 @@ def run_transaction_simulation(
             queue,
             bank,
             processor,
+            processed_at=clock.current_time,
         )
     )
 
@@ -233,6 +260,7 @@ def run_transaction_simulation(
             queue,
             bank,
             processor,
+            processed_at=clock.current_time,
         )
     )
 
