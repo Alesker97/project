@@ -1,0 +1,342 @@
+import asyncio
+import logging
+import time
+from collections.abc import AsyncIterator
+import aiohttp
+import pytest
+from aiohttp import web
+
+from src.crawler.async_crawler import AsyncCrawler
+
+
+async def success_handler(
+    request: web.Request,
+) -> web.Response:
+    return web.Response(text="Успешный ответ")
+
+
+async def not_found_handler(
+    request: web.Request,
+) -> web.Response:
+    return web.Response(
+        text="Страница не найдена",
+        status=404,
+    )
+
+
+async def slow_handler(
+    request: web.Request,
+) -> web.Response:
+    await asyncio.sleep(0.2)
+    return web.Response(text="Медленный ответ")
+
+
+@pytest.fixture
+async def local_server_url() -> AsyncIterator[str]:
+    application = web.Application()
+    application.router.add_get(
+        "/success",
+        success_handler,
+    )
+    application.router.add_get(
+        "/missing",
+        not_found_handler,
+    )
+    application.router.add_get(
+        "/slow",
+        slow_handler,
+    )
+
+    runner = web.AppRunner(application)
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        host="127.0.0.1",
+        port=0,
+    )
+    await site.start()
+
+    server = site._server
+
+    assert server is not None
+    assert server.sockets
+
+    port = server.sockets[0].getsockname()[1]
+
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        await runner.cleanup()
+
+
+def test_init_uses_default_max_concurrent() -> None:
+    crawler = AsyncCrawler()
+
+    assert crawler._max_concurrent == 10
+    assert isinstance(crawler._semaphore, asyncio.Semaphore)
+    assert crawler._session is None
+
+
+@pytest.mark.parametrize(
+    "max_concurrent",
+    [
+        0,
+        -1,
+        1.5,
+        "5",
+        True,
+        None,
+    ],
+)
+def test_init_rejects_invalid_max_concurrent(
+    max_concurrent,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="Количество параллельных запросов",
+    ):
+        AsyncCrawler(max_concurrent=max_concurrent)
+
+
+async def test_get_session_creates_configured_session() -> None:
+    crawler = AsyncCrawler(max_concurrent=3)
+
+    try:
+        session = await crawler._get_session()
+
+        assert isinstance(session, aiohttp.ClientSession)
+        assert session.connector is not None
+        assert session.connector.limit == 3
+        assert session.timeout.connect == 10
+        assert session.timeout.sock_read == 30
+        assert session.closed is False
+    finally:
+        await crawler.close()
+
+
+async def test_get_session_reuses_existing_session() -> None:
+    crawler = AsyncCrawler()
+
+    try:
+        first_session = await crawler._get_session()
+        second_session = await crawler._get_session()
+
+        assert second_session is first_session
+    finally:
+        await crawler.close()
+
+
+async def test_close_closes_session() -> None:
+    crawler = AsyncCrawler()
+    session = await crawler._get_session()
+
+    await crawler.close()
+
+    assert session.closed is True
+
+
+async def test_close_can_be_called_multiple_times() -> None:
+    crawler = AsyncCrawler()
+    session = await crawler._get_session()
+
+    await crawler.close()
+    await crawler.close()
+
+    assert session.closed is True
+
+
+async def test_get_session_recreates_closed_session() -> None:
+    crawler = AsyncCrawler()
+    first_session = await crawler._get_session()
+
+    await crawler.close()
+
+    try:
+        second_session = await crawler._get_session()
+
+        assert second_session is not first_session
+        assert second_session.closed is False
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_url_returns_response_content(
+    local_server_url: str,
+    caplog,
+) -> None:
+    crawler = AsyncCrawler()
+    caplog.set_level(
+        logging.INFO,
+        logger="src.crawler.async_crawler",
+    )
+
+    try:
+        result = await crawler.fetch_url(
+            f"{local_server_url}/success"
+        )
+
+        assert result == "Успешный ответ"
+        assert "Начало загрузки URL" in caplog.text
+        assert "Успешная загрузка URL" in caplog.text
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_url_handles_http_error(
+    local_server_url: str,
+    caplog,
+) -> None:
+    crawler = AsyncCrawler()
+    caplog.set_level(
+        logging.ERROR,
+        logger="src.crawler.async_crawler",
+    )
+
+    try:
+        result = await crawler.fetch_url(
+            f"{local_server_url}/missing"
+        )
+
+        assert result == ""
+        assert "HTTP-ошибка" in caplog.text
+        assert "404" in caplog.text
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_url_handles_timeout(
+    local_server_url: str,
+    caplog,
+) -> None:
+    crawler = AsyncCrawler()
+    crawler._timeout = aiohttp.ClientTimeout(
+        connect=1,
+        sock_read=0.05,
+    )
+    caplog.set_level(
+        logging.ERROR,
+        logger="src.crawler.async_crawler",
+    )
+
+    try:
+        result = await crawler.fetch_url(
+            f"{local_server_url}/slow"
+        )
+
+        assert result == ""
+        assert "Таймаут при загрузке URL" in caplog.text
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_url_handles_client_error(
+    caplog,
+) -> None:
+    crawler = AsyncCrawler()
+    caplog.set_level(
+        logging.ERROR,
+        logger="src.crawler.async_crawler",
+    )
+
+    try:
+        result = await crawler.fetch_url(
+            "invalid-url"
+        )
+
+        assert result == ""
+        assert "Сетевая ошибка" in caplog.text
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_urls_returns_results_for_every_url(
+    local_server_url: str,
+) -> None:
+    crawler = AsyncCrawler(max_concurrent=3)
+    urls = [
+        f"{local_server_url}/success?request=1",
+        f"{local_server_url}/success?request=2",
+        f"{local_server_url}/success?request=3",
+    ]
+
+    try:
+        results = await crawler.fetch_urls(urls)
+
+        assert results == {
+            urls[0]: "Успешный ответ",
+            urls[1]: "Успешный ответ",
+            urls[2]: "Успешный ответ",
+        }
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_urls_keeps_failed_request_in_results(
+    local_server_url: str,
+) -> None:
+    crawler = AsyncCrawler(max_concurrent=2)
+    success_url = f"{local_server_url}/success"
+    missing_url = f"{local_server_url}/missing"
+    urls = [
+        success_url,
+        missing_url,
+    ]
+
+    try:
+        results = await crawler.fetch_urls(urls)
+
+        assert results == {
+            success_url: "Успешный ответ",
+            missing_url: "",
+        }
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_urls_accepts_empty_list() -> None:
+    crawler = AsyncCrawler()
+
+    try:
+        results = await crawler.fetch_urls([])
+
+        assert results == {}
+        assert crawler._session is None
+    finally:
+        await crawler.close()
+
+
+async def test_parallel_loading_is_faster_than_sequential(
+    local_server_url: str,
+) -> None:
+    urls = [
+        f"{local_server_url}/slow?request=1",
+        f"{local_server_url}/slow?request=2",
+        f"{local_server_url}/slow?request=3",
+    ]
+    sequential_crawler = AsyncCrawler(max_concurrent=1)
+    parallel_crawler = AsyncCrawler(max_concurrent=3)
+
+    try:
+        sequential_started_at = time.perf_counter()
+        sequential_results = await sequential_crawler.fetch_urls(
+            urls
+        )
+        sequential_duration = (
+            time.perf_counter() - sequential_started_at
+        )
+
+        parallel_started_at = time.perf_counter()
+        parallel_results = await parallel_crawler.fetch_urls(
+            urls
+        )
+        parallel_duration = (
+            time.perf_counter() - parallel_started_at
+        )
+
+        assert all(sequential_results.values())
+        assert all(parallel_results.values())
+        assert parallel_duration < sequential_duration
+    finally:
+        await sequential_crawler.close()
+        await parallel_crawler.close()
