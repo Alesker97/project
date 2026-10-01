@@ -2,6 +2,8 @@ import asyncio
 import logging
 import aiohttp
 
+from src.parsers.html_parser import HTMLParser
+
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ class AsyncCrawler:
             sock_read=30,
         )
         self._session: aiohttp.ClientSession | None = None
+        self._parser = HTMLParser()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -87,6 +90,27 @@ class AsyncCrawler:
                 strict=True,
             )
         )
+
+    async def fetch_and_parse(
+        self,
+        url: str,
+    ) -> dict[str, object]:
+        html = await self.fetch_url(url)
+
+        logger.info(
+            "Начало парсинга URL: %s",
+            url,
+        )
+        result = await self._parser.parse_html(
+            html,
+            url,
+        )
+        logger.info(
+            "Парсинг URL завершён: %s",
+            url,
+        )
+
+        return result
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
