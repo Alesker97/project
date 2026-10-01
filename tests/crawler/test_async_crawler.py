@@ -31,6 +31,47 @@ async def slow_handler(
     return web.Response(text="Медленный ответ")
 
 
+async def html_handler(
+    request: web.Request,
+) -> web.Response:
+    return web.Response(
+        text="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Страница краулера</title>
+            <meta
+                name="description"
+                content="Описание страницы краулера"
+            >
+            <meta
+                name="keywords"
+                content="crawler, asyncio"
+            >
+        </head>
+        <body>
+            <main>
+                <h1>Асинхронный краулер</h1>
+                <p>Текст тестовой страницы</p>
+                <a href="/next#section">
+                    Следующая страница
+                </a>
+                <img
+                    src="/images/logo.png"
+                    alt="Логотип"
+                >
+                <ul>
+                    <li>Первый пункт</li>
+                    <li>Второй пункт</li>
+                </ul>
+            </main>
+        </body>
+        </html>
+        """,
+        content_type="text/html",
+    )
+
+
 @pytest.fixture
 async def local_server_url() -> AsyncIterator[str]:
     application = web.Application()
@@ -45,6 +86,10 @@ async def local_server_url() -> AsyncIterator[str]:
     application.router.add_get(
         "/slow",
         slow_handler,
+    )
+    application.router.add_get(
+        "/html",
+        html_handler,
     )
 
     runner = web.AppRunner(application)
@@ -340,3 +385,110 @@ async def test_parallel_loading_is_faster_than_sequential(
     finally:
         await sequential_crawler.close()
         await parallel_crawler.close()
+
+
+async def test_fetch_and_parse_returns_structured_data(
+    local_server_url: str,
+) -> None:
+    crawler = AsyncCrawler()
+
+    try:
+        result = await crawler.fetch_and_parse(
+            f"{local_server_url}/html"
+        )
+
+        assert result["url"] == (
+            f"{local_server_url}/html"
+        )
+        assert result["title"] == (
+            "Страница краулера"
+        )
+        assert (
+            "Асинхронный краулер"
+            in result["text"]
+        )
+        assert (
+            "Текст тестовой страницы"
+            in result["text"]
+        )
+        assert result["metadata"] == {
+            "title": "Страница краулера",
+            "description": (
+                "Описание страницы краулера"
+            ),
+            "keywords": "crawler, asyncio",
+        }
+        assert result["headings"] == [
+            {
+                "level": "h1",
+                "text": "Асинхронный краулер",
+            }
+        ]
+        assert result["lists"] == [
+            {
+                "type": "ul",
+                "items": [
+                    "Первый пункт",
+                    "Второй пункт",
+                ],
+            }
+        ]
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_and_parse_resolves_relative_urls(
+    local_server_url: str,
+) -> None:
+    crawler = AsyncCrawler()
+    page_url = f"{local_server_url}/html"
+
+    try:
+        result = await crawler.fetch_and_parse(
+            page_url
+        )
+
+        assert result["links"] == [
+            f"{local_server_url}/next"
+        ]
+        assert result["images"] == [
+            {
+                "src": (
+                    f"{local_server_url}"
+                    "/images/logo.png"
+                ),
+                "alt": "Логотип",
+            }
+        ]
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_and_parse_handles_http_error(
+    local_server_url: str,
+) -> None:
+    crawler = AsyncCrawler()
+    page_url = f"{local_server_url}/missing"
+
+    try:
+        result = await crawler.fetch_and_parse(
+            page_url
+        )
+
+        assert result == {
+            "url": page_url,
+            "title": "",
+            "text": "",
+            "links": [],
+            "metadata": {
+                "title": "",
+                "description": "",
+                "keywords": "",
+            },
+            "images": [],
+            "headings": [],
+            "tables": [],
+            "lists": [],
+        }
+    finally:
+        await crawler.close()
