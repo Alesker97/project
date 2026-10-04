@@ -6,6 +6,9 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from src.concurrency.semaphore_manager import (
+    SemaphoreManager,
+)
 from src.crawler.async_crawler import AsyncCrawler
 
 
@@ -119,8 +122,24 @@ def test_init_uses_default_max_concurrent() -> None:
     crawler = AsyncCrawler()
 
     assert crawler._max_concurrent == 10
-    assert isinstance(crawler._semaphore, asyncio.Semaphore)
+    assert crawler._max_concurrent_per_domain == 2
+    assert crawler._max_depth == 2
+    assert isinstance(
+        crawler._semaphore_manager,
+        SemaphoreManager,
+    )
+    assert (
+        crawler._semaphore_manager._global_limit
+        == 10
+    )
+    assert (
+        crawler._semaphore_manager._per_domain_limit
+        == 2
+    )
     assert crawler._session is None
+    assert crawler.visited_urls == set()
+    assert crawler.failed_urls == {}
+    assert crawler.processed_urls == {}
 
 
 @pytest.mark.parametrize(
@@ -142,6 +161,29 @@ def test_init_rejects_invalid_max_concurrent(
         match="Количество параллельных запросов",
     ):
         AsyncCrawler(max_concurrent=max_concurrent)
+
+
+@pytest.mark.parametrize(
+    "max_concurrent_per_domain",
+    [
+        0,
+        -1,
+        1.5,
+        True,
+    ],
+)
+def test_init_rejects_invalid_domain_limit(
+    max_concurrent_per_domain,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="Доменный лимит",
+    ):
+        AsyncCrawler(
+            max_concurrent_per_domain=(
+                max_concurrent_per_domain
+            )
+        )
 
 
 async def test_get_session_creates_configured_session() -> None:
@@ -211,17 +253,17 @@ async def test_fetch_url_returns_response_content(
     caplog,
 ) -> None:
     crawler = AsyncCrawler()
+    url = f"{local_server_url}/success"
     caplog.set_level(
         logging.INFO,
         logger="src.crawler.async_crawler",
     )
 
     try:
-        result = await crawler.fetch_url(
-            f"{local_server_url}/success"
-        )
+        result = await crawler.fetch_url(url)
 
         assert result == "Успешный ответ"
+        assert url not in crawler.failed_urls
         assert "Начало загрузки URL" in caplog.text
         assert "Успешная загрузка URL" in caplog.text
     finally:
@@ -233,17 +275,17 @@ async def test_fetch_url_handles_http_error(
     caplog,
 ) -> None:
     crawler = AsyncCrawler()
+    url = f"{local_server_url}/missing"
     caplog.set_level(
         logging.ERROR,
         logger="src.crawler.async_crawler",
     )
 
     try:
-        result = await crawler.fetch_url(
-            f"{local_server_url}/missing"
-        )
+        result = await crawler.fetch_url(url)
 
         assert result == ""
+        assert crawler.failed_urls[url] == "HTTP 404"
         assert "HTTP-ошибка" in caplog.text
         assert "404" in caplog.text
     finally:
@@ -259,37 +301,41 @@ async def test_fetch_url_handles_timeout(
         connect=1,
         sock_read=0.05,
     )
+    url = f"{local_server_url}/slow"
     caplog.set_level(
         logging.ERROR,
         logger="src.crawler.async_crawler",
     )
 
     try:
-        result = await crawler.fetch_url(
-            f"{local_server_url}/slow"
-        )
+        result = await crawler.fetch_url(url)
 
         assert result == ""
+        assert crawler.failed_urls[url] == (
+            "Превышено время ожидания."
+        )
         assert "Таймаут при загрузке URL" in caplog.text
     finally:
         await crawler.close()
 
 
-async def test_fetch_url_handles_client_error(
+async def test_fetch_url_handles_invalid_url(
     caplog,
 ) -> None:
     crawler = AsyncCrawler()
+    url = "invalid-url"
     caplog.set_level(
         logging.ERROR,
         logger="src.crawler.async_crawler",
     )
 
     try:
-        result = await crawler.fetch_url(
-            "invalid-url"
-        )
+        result = await crawler.fetch_url(url)
 
         assert result == ""
+        assert crawler.failed_urls[url].startswith(
+            "ValueError:"
+        )
         assert "Сетевая ошибка" in caplog.text
     finally:
         await crawler.close()
@@ -490,5 +536,53 @@ async def test_fetch_and_parse_handles_http_error(
             "tables": [],
             "lists": [],
         }
+    finally:
+        await crawler.close()
+
+
+async def test_fetch_urls_respects_domain_limit(
+    local_server_url: str,
+) -> None:
+    crawler = AsyncCrawler(
+        max_concurrent=3,
+        max_concurrent_per_domain=1,
+    )
+    urls = [
+        f"{local_server_url}/slow?request=domain-1",
+        f"{local_server_url}/slow?request=domain-2",
+        f"{local_server_url}/slow?request=domain-3",
+    ]
+
+    try:
+        results = await crawler.fetch_urls(urls)
+        stats = (
+            crawler
+            ._semaphore_manager
+            .get_stats()
+        )
+
+        assert all(results.values())
+        assert stats["active"] == 0
+        assert stats["active_by_domain"] == {}
+        assert stats["peak_active"] == 1
+        assert stats["peak_by_domain"] == {
+            "127.0.0.1": 1,
+        }
+    finally:
+        await crawler.close()
+
+
+async def test_successful_fetch_clears_previous_error(
+    local_server_url: str,
+) -> None:
+    crawler = AsyncCrawler()
+    url = f"{local_server_url}/success"
+    crawler.failed_urls[url] = "Старая ошибка"
+
+    try:
+        result = await crawler.fetch_url(url)
+
+        assert result == "Успешный ответ"
+        assert url not in crawler.failed_urls
     finally:
         await crawler.close()

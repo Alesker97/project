@@ -1,7 +1,11 @@
 import asyncio
+import json
 import logging
 import time
+from pathlib import Path
 from typing import cast
+
+import aiofiles
 
 from src.crawler.async_crawler import AsyncCrawler
 
@@ -20,6 +24,14 @@ PARSE_URLS = [
     "https://httpbin.org/html",
     "https://www.python.org",
 ]
+
+CRAWL_START_URLS = [
+    "https://quotes.toscrape.com/",
+]
+
+CRAWL_OUTPUT_PATH = Path(
+    "output/crawl_results.json"
+)
 
 
 async def fetch_sequentially(
@@ -44,6 +56,29 @@ async def fetch_and_parse_pages(
             for url in urls
         )
     )
+
+
+async def save_crawl_results(
+    results: dict[str, dict[str, object]],
+    file_path: Path,
+) -> None:
+    await asyncio.to_thread(
+        file_path.parent.mkdir,
+        parents=True,
+        exist_ok=True,
+    )
+    content = json.dumps(
+        results,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    async with aiofiles.open(
+        file_path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        await file.write(content)
 
 
 def display_results(
@@ -203,6 +238,52 @@ async def main() -> None:
         parallel_duration,
     )
     display_parsed_pages(parsed_pages)
+
+    crawl_crawler = AsyncCrawler(
+        max_concurrent=5,
+        max_concurrent_per_domain=2,
+        max_depth=2,
+    )
+
+    try:
+        print("\nОбход сайта:")
+
+        crawl_results = await crawl_crawler.crawl(
+            start_urls=CRAWL_START_URLS,
+            max_pages=10,
+            same_domain_only=True,
+            exclude_patterns=[
+                "/login",
+            ],
+        )
+        await save_crawl_results(
+            crawl_results,
+            CRAWL_OUTPUT_PATH,
+        )
+
+        crawl_stats = (
+            crawl_crawler.get_crawl_stats()
+        )
+
+        print("\nИтог обхода:")
+        print(
+            "Успешно обработано:",
+            crawl_stats["successful"],
+        )
+        print(
+            "Ошибок:",
+            crawl_stats["failed"],
+        )
+        print(
+            "Скорость:",
+            f"{crawl_stats['speed']:.2f} стр/сек",
+        )
+        print(
+            "Результат сохранён:",
+            CRAWL_OUTPUT_PATH,
+        )
+    finally:
+        await crawl_crawler.close()
 
 
 if __name__ == "__main__":
