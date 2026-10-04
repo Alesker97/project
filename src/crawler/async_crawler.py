@@ -1,18 +1,24 @@
 import asyncio
 import logging
 import time
-from urllib.parse import urldefrag, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import aiohttp
 
 from src.concurrency.semaphore_manager import (
     SemaphoreManager,
 )
+from src.concurrency.rate_limiter import RateLimiter, validate_delay
 from src.parsers.html_parser import HTMLParser
+from src.parsers.robots_parser import RobotsParser, RobotsResponse
 from src.queues.crawler_queue import CrawlerQueue
 
 
 logger = logging.getLogger(__name__)
+
+
+class _RobotsBlockedError(Exception):
+    pass
 
 
 class AsyncCrawler:
@@ -21,6 +27,16 @@ class AsyncCrawler:
         max_concurrent: int = 10,
         max_concurrent_per_domain: int = 2,
         max_depth: int = 2,
+        *,
+        requests_per_second: float = 1.0,
+        per_domain: bool = True,
+        respect_robots: bool = True,
+        min_delay: float = 0.0,
+        jitter: float = 0.0,
+        user_agent: str = "AsyncCrawler/1.0",
+        max_retries: int = 2,
+        backoff_factor: float = 0.5,
+        max_backoff: float = 30.0,
     ) -> None:
         if (
             isinstance(max_concurrent, bool)
@@ -42,6 +58,35 @@ class AsyncCrawler:
                 "неотрицательным целым числом."
             )
 
+        if not isinstance(respect_robots, bool):
+            raise ValueError("respect_robots должен быть логическим значением.")
+        if (
+            not isinstance(user_agent, str)
+            or not user_agent.strip()
+            or "\r" in user_agent
+            or "\n" in user_agent
+        ):
+            raise ValueError("User-Agent должен быть непустой строкой без переносов.")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise ValueError("max_retries должен быть неотрицательным целым числом.")
+
+        self._rate_limiter = RateLimiter(
+            requests_per_second,
+            per_domain,
+            min_delay=min_delay,
+            jitter=jitter,
+        )
+        self._respect_robots = respect_robots
+        self._user_agent = user_agent.strip()
+        self._max_retries = max_retries
+        self._backoff_factor = validate_delay(backoff_factor, "backoff_factor")
+        self._max_backoff = validate_delay(max_backoff, "max_backoff")
+        self._retry_count = 0
+        self.blocked_urls: set[str] = set()
+        self._robots_parser = RobotsParser(
+            user_agent=self._user_agent,
+            fetcher=self._request_with_retries,
+        )
         self._max_concurrent = max_concurrent
         self._max_concurrent_per_domain = (
             max_concurrent_per_domain
@@ -86,6 +131,7 @@ class AsyncCrawler:
             self._session = aiohttp.ClientSession(
                 connector=connector,
                 timeout=self._timeout,
+                headers={"User-Agent": self._user_agent},
             )
 
         return self._session
@@ -96,17 +142,30 @@ class AsyncCrawler:
         logger.info("Начало загрузки URL: %s", url)
 
         try:
-            session = await self._get_session()
-
-            async with self._semaphore_manager.limit(
-                url
-            ):
-                async with session.get(url) as response:
-                    response.raise_for_status()
-                    content = await response.text()
+            current_url = url
+            for _ in range(11):
+                status, content, location = await self._request_with_retries(
+                    current_url, check_robots=self._respect_robots,
+                )
+                if status in {301, 302, 303, 307, 308} and location:
+                    current_url = urljoin(current_url, location)
+                    continue
+                if status >= 400:
+                    self.failed_urls[url] = f"HTTP {status}"
+                    logger.error(
+                        "HTTP-ошибка при загрузке URL %s: статус %s", url, status,
+                    )
+                    return ""
+                break
+            else:
+                raise ValueError("Слишком много перенаправлений страницы.")
 
             logger.info("Успешная загрузка URL: %s", url)
             return content
+        except _RobotsBlockedError as error:
+            self.blocked_urls.add(url)
+            self.failed_urls[url] = f"Заблокировано robots.txt: {error}"
+            logger.warning("URL %s заблокирован robots.txt: %s", url, error)
         except aiohttp.ClientResponseError as error:
             self.failed_urls[url] = (
                 f"HTTP {error.status}"
@@ -139,6 +198,65 @@ class AsyncCrawler:
             )
 
         return ""
+
+    async def _request_with_retries(
+        self,
+        url: str,
+        *,
+        check_robots: bool = False,
+    ) -> RobotsResponse:
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+            raise ValueError("Ожидается корректный HTTP- или HTTPS-адрес.")
+
+        backoff = min(self._backoff_factor, self._max_backoff)
+        for attempt in range(self._max_retries + 1):
+            crawl_delay = 0.0
+            if check_robots:
+                await self._robots_parser.fetch_robots(url)
+                if not self._robots_parser.can_fetch(url, self._user_agent):
+                    raise _RobotsBlockedError(url)
+                crawl_delay = self._robots_parser.get_crawl_delay(
+                    self._user_agent, url=url,
+                )
+
+            try:
+                session = await self._get_session()
+                async with self._semaphore_manager.limit(url):
+                    await self._rate_limiter.acquire(
+                        parsed_url.hostname, crawl_delay=crawl_delay,
+                    )
+                    async with session.get(url, allow_redirects=False) as response:
+                        result = (
+                            response.status,
+                            await response.text(),
+                            response.headers.get("Location"),
+                        )
+                status = result[0]
+                if status != 429 and status < 500:
+                    return result
+                if attempt == self._max_retries:
+                    return result
+                reason = f"HTTP {status}"
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                asyncio.TimeoutError,
+            ) as error:
+                if attempt == self._max_retries:
+                    raise
+                reason = type(error).__name__
+
+            self._retry_count += 1
+            logger.warning(
+                "Повтор %s/%s для %s через %.2f сек: %s",
+                attempt + 1, self._max_retries, url, backoff, reason,
+            )
+            # Backoff не удерживает семафоры или HTTP-соединение.
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, self._max_backoff)
+
+        raise RuntimeError("Исчерпаны попытки запроса.")
 
     async def fetch_urls(
         self,
@@ -302,9 +420,18 @@ class AsyncCrawler:
             "active": queue_stats["active"],
             "failed": failed,
             "speed": speed,
+            **self.get_request_stats(),
+        }
+
+    def get_request_stats(self) -> dict[str, int | float]:
+        return {
+            **self._rate_limiter.get_stats(),
+            "blocked": len(self.blocked_urls),
+            "retries": self._retry_count,
         }
 
     async def close(self) -> None:
+        await self._robots_parser.close()
         if (
             self._session is not None
             and not self._session.closed
@@ -422,6 +549,9 @@ class AsyncCrawler:
         self.visited_urls.clear()
         self.failed_urls.clear()
         self.processed_urls.clear()
+        self.blocked_urls.clear()
+        self._retry_count = 0
+        self._rate_limiter.reset_stats()
         self._url_depths = {}
         self._allowed_domains = set()
         self._queue = CrawlerQueue()
@@ -440,7 +570,10 @@ class AsyncCrawler:
             f"Обработано: {stats['processed']} | "
             f"В очереди: {stats['queued']} | "
             f"Ошибок: {stats['failed']} | "
-            f"Скорость: {stats['speed']:.2f} стр/сек",
+            f"Скорость: {stats['speed']:.2f} стр/сек | "
+            f"Запросы: {stats['requests_per_second']:.2f} req/sec | "
+            f"Средняя задержка: {stats['average_delay']:.3f} сек | "
+            f"Блокировок robots.txt: {stats['blocked']}",
             flush=True,
         )
 

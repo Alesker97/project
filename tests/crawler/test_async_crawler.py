@@ -1,4 +1,5 @@
 import asyncio
+from functools import partial
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -10,6 +11,15 @@ from src.concurrency.semaphore_manager import (
     SemaphoreManager,
 )
 from src.crawler.async_crawler import AsyncCrawler
+
+
+# Тесты дней 1–3 проверяют загрузку и обход без правил вежливости.
+create_crawler = partial(
+    AsyncCrawler,
+    requests_per_second=1000.0,
+    respect_robots=False,
+    max_retries=0,
+)
 
 
 async def success_handler(
@@ -252,7 +262,7 @@ async def test_fetch_url_returns_response_content(
     local_server_url: str,
     caplog,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
     url = f"{local_server_url}/success"
     caplog.set_level(
         logging.INFO,
@@ -274,7 +284,7 @@ async def test_fetch_url_handles_http_error(
     local_server_url: str,
     caplog,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
     url = f"{local_server_url}/missing"
     caplog.set_level(
         logging.ERROR,
@@ -296,7 +306,7 @@ async def test_fetch_url_handles_timeout(
     local_server_url: str,
     caplog,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
     crawler._timeout = aiohttp.ClientTimeout(
         connect=1,
         sock_read=0.05,
@@ -322,7 +332,7 @@ async def test_fetch_url_handles_timeout(
 async def test_fetch_url_handles_invalid_url(
     caplog,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
     url = "invalid-url"
     caplog.set_level(
         logging.ERROR,
@@ -344,7 +354,7 @@ async def test_fetch_url_handles_invalid_url(
 async def test_fetch_urls_returns_results_for_every_url(
     local_server_url: str,
 ) -> None:
-    crawler = AsyncCrawler(max_concurrent=3)
+    crawler = create_crawler(max_concurrent=3)
     urls = [
         f"{local_server_url}/success?request=1",
         f"{local_server_url}/success?request=2",
@@ -366,7 +376,7 @@ async def test_fetch_urls_returns_results_for_every_url(
 async def test_fetch_urls_keeps_failed_request_in_results(
     local_server_url: str,
 ) -> None:
-    crawler = AsyncCrawler(max_concurrent=2)
+    crawler = create_crawler(max_concurrent=2)
     success_url = f"{local_server_url}/success"
     missing_url = f"{local_server_url}/missing"
     urls = [
@@ -386,7 +396,7 @@ async def test_fetch_urls_keeps_failed_request_in_results(
 
 
 async def test_fetch_urls_accepts_empty_list() -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
 
     try:
         results = await crawler.fetch_urls([])
@@ -405,8 +415,8 @@ async def test_parallel_loading_is_faster_than_sequential(
         f"{local_server_url}/slow?request=2",
         f"{local_server_url}/slow?request=3",
     ]
-    sequential_crawler = AsyncCrawler(max_concurrent=1)
-    parallel_crawler = AsyncCrawler(max_concurrent=3)
+    sequential_crawler = create_crawler(max_concurrent=1)
+    parallel_crawler = create_crawler(max_concurrent=3)
 
     try:
         sequential_started_at = time.perf_counter()
@@ -436,7 +446,7 @@ async def test_parallel_loading_is_faster_than_sequential(
 async def test_fetch_and_parse_returns_structured_data(
     local_server_url: str,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
 
     try:
         result = await crawler.fetch_and_parse(
@@ -486,7 +496,7 @@ async def test_fetch_and_parse_returns_structured_data(
 async def test_fetch_and_parse_resolves_relative_urls(
     local_server_url: str,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
     page_url = f"{local_server_url}/html"
 
     try:
@@ -513,7 +523,7 @@ async def test_fetch_and_parse_resolves_relative_urls(
 async def test_fetch_and_parse_handles_http_error(
     local_server_url: str,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
     page_url = f"{local_server_url}/missing"
 
     try:
@@ -543,7 +553,7 @@ async def test_fetch_and_parse_handles_http_error(
 async def test_fetch_urls_respects_domain_limit(
     local_server_url: str,
 ) -> None:
-    crawler = AsyncCrawler(
+    crawler = create_crawler(
         max_concurrent=3,
         max_concurrent_per_domain=1,
     )
@@ -575,7 +585,7 @@ async def test_fetch_urls_respects_domain_limit(
 async def test_successful_fetch_clears_previous_error(
     local_server_url: str,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
     url = f"{local_server_url}/success"
     crawler.failed_urls[url] = "Старая ошибка"
 
