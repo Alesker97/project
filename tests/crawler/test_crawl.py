@@ -1,9 +1,19 @@
 from collections.abc import AsyncIterator
+from functools import partial
 
 import pytest
 from aiohttp import web
 
 from src.crawler.async_crawler import AsyncCrawler
+
+
+# Тесты дней 1–3 проверяют загрузку и обход без правил вежливости.
+create_crawler = partial(
+    AsyncCrawler,
+    requests_per_second=1000.0,
+    respect_robots=False,
+    max_retries=0,
+)
 
 
 @pytest.fixture
@@ -201,7 +211,7 @@ def test_init_rejects_invalid_max_depth(
 async def test_crawl_rejects_invalid_max_pages(
     max_pages,
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
 
     try:
         with pytest.raises(
@@ -218,7 +228,7 @@ async def test_crawl_rejects_invalid_max_pages(
 
 async def test_crawl_rejects_empty_start_urls(
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
 
     try:
         with pytest.raises(
@@ -232,7 +242,7 @@ async def test_crawl_rejects_empty_start_urls(
 
 async def test_crawl_rejects_invalid_start_url(
 ) -> None:
-    crawler = AsyncCrawler()
+    crawler = create_crawler()
 
     try:
         with pytest.raises(
@@ -295,7 +305,7 @@ async def test_crawl_respects_max_depth(
     expected_failed_paths: set[str],
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(
+    crawler = create_crawler(
         max_concurrent=4,
         max_concurrent_per_domain=2,
         max_depth=max_depth,
@@ -328,7 +338,7 @@ async def test_crawl_filters_external_domains(
     crawl_site,
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(max_depth=1)
+    crawler = create_crawler(max_depth=1)
 
     try:
         await crawler.crawl(
@@ -353,7 +363,7 @@ async def test_crawl_applies_exclude_patterns(
     crawl_site,
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(max_depth=1)
+    crawler = create_crawler(max_depth=1)
 
     try:
         results = await crawler.crawl(
@@ -382,7 +392,7 @@ async def test_crawl_applies_include_patterns(
     crawl_site,
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(max_depth=2)
+    crawler = create_crawler(max_depth=2)
 
     try:
         results = await crawler.crawl(
@@ -407,7 +417,7 @@ async def test_crawl_processes_duplicate_once(
     crawl_site,
 ) -> None:
     base_url, counters = crawl_site
-    crawler = AsyncCrawler(max_depth=2)
+    crawler = create_crawler(max_depth=2)
 
     try:
         await crawler.crawl(
@@ -436,7 +446,7 @@ async def test_crawl_records_failed_urls(
     crawl_site,
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(max_depth=1)
+    crawler = create_crawler(max_depth=1)
 
     try:
         await crawler.crawl(
@@ -469,7 +479,7 @@ async def test_crawl_respects_max_pages(
     crawl_site,
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(max_depth=2)
+    crawler = create_crawler(max_depth=2)
 
     try:
         results = await crawler.crawl(
@@ -494,7 +504,7 @@ async def test_crawl_displays_progress_and_stats(
     capsys: pytest.CaptureFixture,
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(max_depth=1)
+    crawler = create_crawler(max_depth=1)
 
     try:
         await crawler.crawl(
@@ -524,7 +534,7 @@ async def test_crawl_resets_previous_state(
     crawl_site,
 ) -> None:
     base_url, _ = crawl_site
-    crawler = AsyncCrawler(max_depth=1)
+    crawler = create_crawler(max_depth=1)
 
     try:
         await crawler.crawl(

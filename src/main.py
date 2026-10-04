@@ -2,10 +2,12 @@ import asyncio
 import json
 import logging
 import time
+from collections import Counter
 from pathlib import Path
 from typing import cast
 
 import aiofiles
+from aiohttp import web
 
 from src.crawler.async_crawler import AsyncCrawler
 
@@ -191,6 +193,60 @@ def display_parsed_pages(
                 print(f"- {link}")
 
 
+async def demonstrate_politeness() -> None:
+    """Проверяем правила вежливости на небольшом локальном сайте."""
+    hits: Counter[str] = Counter()
+
+    async def handle(request: web.Request) -> web.Response:
+        hits[request.path] += 1
+        if request.path == "/robots.txt":
+            return web.Response(text=(
+                "User-agent: MyBot\nDisallow: /private\nCrawl-delay: 0.15\n"
+            ))
+        if request.path == "/":
+            return web.Response(text=(
+                '<a href="/public">Открытая страница</a>'
+                '<a href="/private">Запрещённая страница</a>'
+                '<a href="/unstable">Временная ошибка</a>'
+            ), content_type="text/html")
+        if request.path == "/unstable" and hits[request.path] <= 2:
+            return web.Response(status=503, text="Попробуйте позже")
+        return web.Response(
+            text="<h1>Страница загружена</h1>", content_type="text/html",
+        )
+
+    application = web.Application()
+    application.router.add_get("/{path:.*}", handle)
+    runner = web.AppRunner(application, access_log=None)
+    await runner.setup()
+    crawler = AsyncCrawler(
+        max_concurrent=5,
+        requests_per_second=10.0,
+        respect_robots=True,
+        min_delay=0.05,
+        jitter=0.02,
+        user_agent="MyBot/1.0",
+        backoff_factor=0.1,
+    )
+    try:
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        port = runner.addresses[0][1]
+        base_url = f"http://127.0.0.1:{port}"
+        print(f"\nДень 4. Учебный сайт: {base_url}")
+        print("Crawl-delay: 0.15 сек; /private запрещён; /unstable дважды вернёт 503.")
+        await crawler.crawl([base_url], max_pages=10, same_domain_only=True)
+        stats = crawler.get_crawl_stats()
+        print(f"\nУспешных страниц: {stats['successful']}")
+        print(f"HTTP-запросов (включая robots.txt и повторы): {stats['requests']}")
+        print(f"Текущая скорость: {stats['requests_per_second']:.2f} req/sec")
+        print(f"Средняя задержка: {stats['average_delay']:.3f} сек")
+        print(f"Заблокировано URL: {stats['blocked']}; повторов: {stats['retries']}")
+        print(f"Запросов к /private на сервере: {hits['/private']}")
+    finally:
+        await crawler.close()
+        await runner.cleanup()
+
+
 async def main() -> None:
     sequential_crawler = AsyncCrawler(
         max_concurrent=5
@@ -243,6 +299,11 @@ async def main() -> None:
         max_concurrent=5,
         max_concurrent_per_domain=2,
         max_depth=2,
+        requests_per_second=2.0,
+        respect_robots=True,
+        min_delay=0.5,
+        jitter=0.05,
+        user_agent="MyBot/1.0",
     )
 
     try:
@@ -282,8 +343,19 @@ async def main() -> None:
             "Результат сохранён:",
             CRAWL_OUTPUT_PATH,
         )
+        print(
+            "Скорость запросов:",
+            f"{crawl_stats['requests_per_second']:.2f} req/sec",
+        )
+        print(
+            "Средняя задержка:",
+            f"{crawl_stats['average_delay']:.3f} сек",
+        )
+        print("Блокировок robots.txt:", crawl_stats["blocked"])
     finally:
         await crawl_crawler.close()
+
+    await demonstrate_politeness()
 
 
 if __name__ == "__main__":
