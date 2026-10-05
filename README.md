@@ -16,7 +16,7 @@
 - структурированного логирования;
 - тестирования асинхронного кода.
 
-Краулер загружает страницы, извлекает структурированные данные, автоматически обходит найденные ссылки, соблюдает ограничения скорости и правила `robots.txt`, сохраняет результаты в файлы и SQLite.
+Краулер загружает страницы и sitemap.xml, извлекает структурированные данные, автоматически обходит ссылки, соблюдает ограничения скорости и правила `robots.txt`, сохраняет результаты в файлы и SQLite. Запуск доступен через CLI или Python API.
 
 ## Возможности
 
@@ -98,18 +98,53 @@ finally:
     await crawler.close()
 ```
 
+## Полный запуск
+
+```bash
+python crawler.py --urls https://example.com --max-pages 100 --output output/pages.jsonl
+python crawler.py --config config.example.json
+```
+
+`AdvancedCrawler` объединяет загрузку sitemap, обход, сохранение, статистику и отчёты. CLI принимает `--urls`, `--sitemaps`, `--max-pages`, `--max-depth`, `--output`, `--config`, `--respect-robots` / `--no-respect-robots`, `--rate-limit`, `--stats-json` и `--html-report`. Файл [config.example.json](config.example.json) показывает настройку скорости, фильтров, хранилища, логов и отчётов. Подробности приведены в [руководстве по конфигурации](docs/configuration.md).
+
+```python
+import asyncio
+from crawler import AdvancedCrawler
+
+async def main():
+    crawler = AdvancedCrawler.from_config("config.example.json")
+    try:
+        await crawler.crawl()
+        stats = crawler.get_stats()
+        print(stats.total_pages, stats.successful, stats.failed)
+        crawler.export_to_html_report("output/report.html")
+    finally:
+        await crawler.close()
+
+asyncio.run(main())
+```
+
+`CrawlerStats` содержит скорость, время работы, распределение HTTP-статусов и топ доменов. HTML-отчёт включает таблицы и столбики значений. Во время обхода выводятся процент выполнения, активные задачи и оценка оставшегося времени. JSON-логи записываются в консоль и файл с ротацией, если настроен раздел `logging`.
+
 ## Структура проекта
 
 ```text
 project/
+├── benchmarks/
+│   └── crawler_benchmark.py
 ├── docs/
+│   ├── configuration.md
+│   ├── performance.md
 │   └── algorythms/
 │       ├── async_http_client.md
 │       ├── crawl_management.md
 │       ├── data_storage.md
 │       ├── error_handling_and_retries.md
 │       ├── html_parsing.md
-│       └── rate_limiting.md
+│       ├── rate_limiting.md
+│       └── sitemap_and_reporting.md
+├── examples/
+│   └── run_crawler.py
 ├── output/
 │   ├── crawl_results.json
 │   └── error_report.json
@@ -118,9 +153,12 @@ project/
 │   │   ├── rate_limiter.py
 │   │   └── semaphore_manager.py
 │   ├── crawler/
+│   │   ├── advanced_crawler.py
 │   │   ├── async_crawler.py
 │   │   ├── errors.py
-│   │   └── retry_strategy.py
+│   │   ├── logging_config.py
+│   │   ├── retry_strategy.py
+│   │   └── stats.py
 │   ├── storage/
 │   │   ├── base.py
 │   │   ├── csv_storage.py
@@ -128,16 +166,19 @@ project/
 │   │   └── sqlite_storage.py
 │   ├── parsers/
 │   │   ├── html_parser.py
-│   │   └── robots_parser.py
+│   │   ├── robots_parser.py
+│   │   └── sitemap_parser.py
 │   ├── queues/
 │   │   └── crawler_queue.py
 │   ├── __init__.py
+│   ├── cli.py
 │   └── main.py
 ├── tests/
 │   ├── concurrency/
 │   │   ├── test_rate_limiter.py
 │   │   └── test_semaphore_manager.py
 │   ├── crawler/
+│   │   ├── test_advanced_crawler.py
 │   │   ├── test_async_crawler.py
 │   │   ├── test_crawl.py
 │   │   ├── test_crawler_storage.py
@@ -146,13 +187,17 @@ project/
 │   │   └── test_retry_strategy.py
 │   ├── parsers/
 │   │   ├── test_html_parser.py
-│   │   └── test_robots_parser.py
+│   │   ├── test_robots_parser.py
+│   │   └── test_sitemap_parser.py
 │   ├── queues/
 │   │   └── test_crawler_queue.py
 │   ├── storage/
 │   │   └── test_storage.py
+│   ├── test_benchmark.py
 │   └── test_main.py
 ├── .gitignore
+├── config.example.json
+├── crawler.py
 ├── pytest.ini
 ├── README.md
 └── requirements.txt
@@ -659,7 +704,7 @@ python -m pytest tests/test_main.py -v
 
 Тесты сетевых операций используют локальный HTTP-сервер. Поэтому они не зависят от доступности внешних сайтов и скорости интернет-соединения.
 
-На текущем этапе тестовый набор содержит 164 теста. Все тесты успешно пройдены; после них проверен запуск `python -m src.main`.
+Тестовый набор содержит 173 теста. Все тесты успешно пройдены. Локальный бенчмарк обработал 100, 500 и 1000 страниц; его результаты и ограничения описаны в [отчёте о производительности](docs/performance.md).
 
 Тесты ограничения скорости и правил обхода:
 
@@ -670,6 +715,8 @@ python -m pytest tests/concurrency/test_rate_limiter.py tests/parsers/test_robot
 Проверяются отдельные и глобальные лимиты, задержки, jitter, кэширование и парсинг правил, выбор User-Agent, запреты, редиректы, backoff, таймауты, статистика и локальная демонстрация в `main`.
 
 ## Документация алгоритмов
+
+Загрузка sitemap, сводная статистика, HTML-отчёт и логи: [sitemap и отчёты](docs/algorythms/sitemap_and_reporting.md).
 
 Описание асинхронного хранения: [сохранение данных](docs/algorythms/data_storage.md).
 
