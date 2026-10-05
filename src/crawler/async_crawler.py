@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from urllib.parse import urldefrag, urljoin, urlparse
 
 import aiohttp
@@ -16,6 +17,7 @@ from src.crawler.retry_strategy import RetryStrategy, retry_attempt
 from src.parsers.html_parser import HTMLParser
 from src.parsers.robots_parser import RobotsParser, RobotsResponse
 from src.queues.crawler_queue import CrawlerQueue
+from src.storage.base import DataStorage
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,9 @@ class AsyncCrawler:
         connect_timeout: float = 10.0,
         read_timeout: float = 30.0,
         total_timeout: float | None = None,
+        storage: DataStorage | None = None,
+        storage_retries: int = 2,
+        storage_backoff: float = 0.05,
     ) -> None:
         if (
             isinstance(max_concurrent, bool)
@@ -103,6 +108,18 @@ class AsyncCrawler:
         )
         if self._connect_timeout == 0 or self._read_timeout == 0 or self._total_timeout == 0:
             raise ValueError("Таймауты должны быть положительными.")
+        if storage is not None and not isinstance(storage, DataStorage):
+            raise ValueError("storage должен быть экземпляром DataStorage.")
+        if isinstance(storage_retries, bool) or not isinstance(storage_retries, int) or storage_retries < 0:
+            raise ValueError("storage_retries должен быть неотрицательным целым числом.")
+        self.storage = storage
+        self._storage_retries = storage_retries
+        self._storage_backoff = validate_delay(storage_backoff, "storage_backoff")
+        self._stored_count = 0
+        self._storage_retry_count = 0
+        self.storage_failed_urls: dict[str, str] = {}
+        self._response_details: dict[str, tuple[int, str]] = {}
+        self._page_response_details: dict[str, tuple[int, str]] = {}
         self.blocked_urls: set[str] = set()
         self._robots_parser = RobotsParser(
             user_agent=self._user_agent,
@@ -185,6 +202,9 @@ class AsyncCrawler:
                 raise ValueError("Слишком много перенаправлений страницы.")
 
             logger.info("Успешная загрузка URL: %s", url)
+            self._page_response_details[url] = self._response_details.get(
+                current_url, (status, ""),
+            )
             return content
         except _RobotsBlockedError as error:
             self.blocked_urls.add(url)
@@ -295,6 +315,11 @@ class AsyncCrawler:
                         await response.text(),
                         response.headers.get("Location"),
                     )
+                    if response.status < 400:
+                        self._response_details[url] = (
+                            response.status,
+                            response.headers.get("Content-Type", "").split(";", 1)[0].strip(),
+                        )
         except asyncio.TimeoutError as error:
             raise TransientError("Превышено время ожидания.", url=url) from error
         except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as error:
@@ -354,6 +379,9 @@ class AsyncCrawler:
             "Парсинг URL завершён: %s",
             url,
         )
+
+        if url not in self.failed_urls:
+            await self._save_page(url, result)
 
         return result
 
@@ -455,6 +483,7 @@ class AsyncCrawler:
                 )
             )
 
+        await self._flush_storage()
         return dict(self.processed_urls)
 
     def get_crawl_stats(
@@ -502,6 +531,14 @@ class AsyncCrawler:
             "attempts": list(self.retry_strategy.events),
         }
 
+    def get_storage_stats(self) -> dict[str, object]:
+        return {
+            "saved": self._stored_count,
+            "failed": len(self.storage_failed_urls),
+            "retries": self._storage_retry_count,
+            "failed_urls": dict(self.storage_failed_urls),
+        }
+
     async def close(self) -> None:
         await self._robots_parser.close()
         if (
@@ -509,6 +546,11 @@ class AsyncCrawler:
             and not self._session.closed
         ):
             await self._session.close()
+        if self.storage is not None:
+            try:
+                await self.storage.close()
+            except Exception as error:
+                logger.error("Ошибка закрытия хранилища: %s", error)
 
     async def _process_crawl_url(
         self,
@@ -545,6 +587,56 @@ class AsyncCrawler:
             )
         finally:
             self._display_progress()
+
+    async def _save_page(self, url: str, result: dict[str, object]) -> None:
+        if self.storage is None:
+            return
+        status_code, content_type = self._page_response_details.get(url, (200, ""))
+        record = {
+            "url": url,
+            "title": result["title"],
+            "text": result["text"],
+            "links": result["links"],
+            "metadata": result["metadata"],
+            "crawled_at": datetime.now(timezone.utc),
+            "status_code": status_code,
+            "content_type": content_type,
+        }
+        for attempt in range(self._storage_retries + 1):
+            try:
+                await self.storage.save(record)
+            except Exception as error:
+                if attempt == self._storage_retries:
+                    self.storage_failed_urls[url] = f"{type(error).__name__}: {error}"
+                    logger.error("Не удалось сохранить URL %s после %s попыток: %s", url, attempt + 1, error)
+                    return
+                self._storage_retry_count += 1
+                delay = self._storage_backoff * (2 ** attempt)
+                logger.warning("Ошибка сохранения URL %s, попытка %s, повтор через %.2f сек: %s", url, attempt + 1, delay, error)
+                await asyncio.sleep(delay)
+            else:
+                self._stored_count += 1
+                self.storage_failed_urls.pop(url, None)
+                return
+
+    async def _flush_storage(self) -> None:
+        if self.storage is None:
+            return
+        for attempt in range(self._storage_retries + 1):
+            try:
+                await self.storage.flush()
+            except Exception as error:
+                if attempt == self._storage_retries:
+                    for url in self.storage.pending_urls:
+                        if url not in self.storage_failed_urls:
+                            self._stored_count -= 1
+                        self.storage_failed_urls[url] = f"{type(error).__name__}: {error}"
+                    logger.error("Не удалось сбросить буфер хранилища: %s", error)
+                    return
+                self._storage_retry_count += 1
+                await asyncio.sleep(self._storage_backoff * (2 ** attempt))
+            else:
+                return
 
     def _add_discovered_links(
         self,
@@ -622,6 +714,11 @@ class AsyncCrawler:
         self.failed_urls.clear()
         self.processed_urls.clear()
         self.blocked_urls.clear()
+        self.storage_failed_urls.clear()
+        self._stored_count = 0
+        self._storage_retry_count = 0
+        self._response_details.clear()
+        self._page_response_details.clear()
         self.retry_strategy.reset_stats()
         self._rate_limiter.reset_stats()
         self._url_depths = {}

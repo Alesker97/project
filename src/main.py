@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
 from typing import cast
@@ -10,6 +11,7 @@ import aiofiles
 from aiohttp import web
 
 from src.crawler.async_crawler import AsyncCrawler
+from src.storage import CSVStorage, JSONStorage, SQLiteStorage
 
 
 URLS = [
@@ -232,7 +234,7 @@ async def demonstrate_politeness() -> None:
         await web.TCPSite(runner, "127.0.0.1", 0).start()
         port = runner.addresses[0][1]
         base_url = f"http://127.0.0.1:{port}"
-        print(f"\nДень 4. Учебный сайт: {base_url}")
+        print(f"\nПравила обхода. Учебный сайт: {base_url}")
         print("Crawl-delay: 0.15 сек; /private запрещён; /unstable дважды вернёт 503.")
         await crawler.crawl([base_url], max_pages=10, same_domain_only=True)
         stats = crawler.get_crawl_stats()
@@ -248,7 +250,7 @@ async def demonstrate_politeness() -> None:
 
 
 async def demonstrate_errors() -> None:
-    """Воспроизводимые ошибки дня 5 на локальном HTTP-сервере."""
+    """Воспроизводимые ошибки на локальном HTTP-сервере."""
     hits: Counter[str] = Counter()
 
     async def handle(request: web.Request) -> web.Response:
@@ -294,7 +296,7 @@ async def demonstrate_errors() -> None:
         output_path = Path("output/error_report.json")
         await save_crawl_results(report, output_path)
         stats = report["statistics"]
-        print("\nДень 5. Обработка ошибок:")
+        print("\nОбработка ошибок:")
         print("Ошибок по типам:", stats["errors_by_type"])
         print("Успешных повторов:", stats["successful_retries"])
         print("Средняя пауза перед повтором:", f"{stats['average_retry_time']:.3f} сек")
@@ -303,6 +305,52 @@ async def demonstrate_errors() -> None:
     finally:
         await crawler.close()
         await runner.cleanup()
+
+
+async def demonstrate_storage(output_dir: Path | None = None) -> dict[str, object]:
+    """Обходит локальный сайт и читает страницы из трёх хранилищ."""
+    async def handle(request: web.Request) -> web.Response:
+        if request.path == "/":
+            html = '<html><head><title>Главная</title></head><body><a href="/next">Далее</a></body></html>'
+        else:
+            html = '<html><head><title>Вторая, страница</title></head><body><p>Текст с ";" и переводом\nстроки</p></body></html>'
+        return web.Response(text=html, content_type="text/html")
+
+    application = web.Application()
+    application.router.add_get("/{path:.*}", handle)
+    runner = web.AppRunner(application, access_log=None)
+    await runner.setup()
+    directory = output_dir or Path("output/storage_demo") / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    results: dict[str, object] = {}
+    try:
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        base_url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        storages = {
+            "JSON Lines": JSONStorage(directory / "pages.jsonl", buffer_size=2),
+            "CSV": CSVStorage(directory / "pages.csv", buffer_size=2),
+            "SQLite": SQLiteStorage(directory / "pages.db", batch_size=2),
+        }
+        for name, storage in storages.items():
+            crawler = AsyncCrawler(
+                storage=storage,
+                max_concurrent=2,
+                requests_per_second=1000.0,
+                respect_robots=False,
+                max_retries=0,
+            )
+            try:
+                await crawler.crawl([base_url], max_pages=2, same_domain_only=True)
+                pages = await storage.read_all()
+                stats = crawler.get_storage_stats()
+                results[name] = {"path": str(storage.path), "stats": stats, "pages": pages}
+                print(f"Хранилище {name}: сохранено {stats['saved']}, прочитано {len(pages)}; {storage.path}")
+                for page in pages:
+                    print(f"  {page['url']} — {page['title']}")
+            finally:
+                await crawler.close()
+    finally:
+        await runner.cleanup()
+    return results
 
 
 async def main() -> None:
@@ -415,6 +463,7 @@ async def main() -> None:
 
     await demonstrate_politeness()
     await demonstrate_errors()
+    await demonstrate_storage()
 
 
 if __name__ == "__main__":
