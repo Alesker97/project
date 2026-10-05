@@ -247,6 +247,64 @@ async def demonstrate_politeness() -> None:
         await runner.cleanup()
 
 
+async def demonstrate_errors() -> None:
+    """Воспроизводимые ошибки дня 5 на локальном HTTP-сервере."""
+    hits: Counter[str] = Counter()
+
+    async def handle(request: web.Request) -> web.Response:
+        path = request.path
+        hits[path] += 1
+        if path == "/":
+            links = ["/limited", "/unavailable", "/server-error", "/missing", "/forbidden", "/slow"]
+            return web.Response(
+                text="".join(f'<a href="{link}">{link}</a>' for link in links),
+                content_type="text/html",
+            )
+        if path == "/limited" and hits[path] <= 2:
+            return web.Response(status=429)
+        if path == "/unavailable" and hits[path] <= 2:
+            return web.Response(status=503)
+        if path == "/server-error":
+            return web.Response(status=500)
+        if path == "/missing":
+            return web.Response(status=404)
+        if path == "/forbidden":
+            return web.Response(status=403)
+        if path == "/slow":
+            await asyncio.sleep(0.04)
+        return web.Response(text="<h1>Готово</h1>", content_type="text/html")
+
+    application = web.Application()
+    application.router.add_get("/{path:.*}", handle)
+    runner = web.AppRunner(application, access_log=None)
+    await runner.setup()
+    crawler = AsyncCrawler(
+        max_concurrent=4,
+        requests_per_second=1000.0,
+        respect_robots=False,
+        max_retries=2,
+        backoff_factor=0.02,
+        total_timeout=0.025,
+    )
+    try:
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        base_url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        await crawler.crawl([base_url], max_pages=7, same_domain_only=True)
+        report = crawler.get_error_report()
+        output_path = Path("output/error_report.json")
+        await save_crawl_results(report, output_path)
+        stats = report["statistics"]
+        print("\nДень 5. Обработка ошибок:")
+        print("Ошибок по типам:", stats["errors_by_type"])
+        print("Успешных повторов:", stats["successful_retries"])
+        print("Средняя пауза перед повтором:", f"{stats['average_retry_time']:.3f} сек")
+        print("Постоянные ошибки:", stats["permanent_urls"])
+        print("Отчёт сохранён:", output_path)
+    finally:
+        await crawler.close()
+        await runner.cleanup()
+
+
 async def main() -> None:
     sequential_crawler = AsyncCrawler(
         max_concurrent=5
@@ -356,6 +414,7 @@ async def main() -> None:
         await crawl_crawler.close()
 
     await demonstrate_politeness()
+    await demonstrate_errors()
 
 
 if __name__ == "__main__":

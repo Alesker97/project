@@ -8,6 +8,7 @@ from urllib.robotparser import RobotFileParser
 import aiohttp
 
 from src.concurrency.rate_limiter import validate_delay
+from src.crawler.errors import CrawlerError
 
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,7 @@ class RobotsParser:
             else:
                 parser.parse(text.splitlines())
             logger.info("Загружен robots.txt: %s, статус %s", robots_url, status)
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, CrawlerError) as error:
             parser.disallow_all = True
             logger.warning("Не удалось загрузить %s: %s", robots_url, error)
 

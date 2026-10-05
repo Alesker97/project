@@ -16,7 +16,7 @@
 - структурированного логирования;
 - тестирования асинхронного кода.
 
-Реализованы первые четыре дня. Краулер загружает страницы, извлекает структурированные данные, автоматически обходит найденные ссылки и соблюдает ограничения скорости и правила `robots.txt`.
+Реализованы первые пять дней. Краулер загружает страницы, извлекает структурированные данные, автоматически обходит найденные ссылки и соблюдает ограничения скорости и правила `robots.txt`.
 
 ## Возможности
 
@@ -64,6 +64,26 @@
 - повторы временных ошибок с экспоненциальным backoff;
 - статистика частоты запросов, задержек, повторов и блокировок.
 
+В пятом дне добавлены классификация ошибок, отдельный `RetryStrategy`, лимиты и задержки повторов по типам ошибок, увеличение таймаутов при повторах, история попыток и JSON-отчёт. Локальная демонстрация запускается вместе с `python -m src.main` и сохраняет `output/error_report.json`.
+
+Для самостоятельного применения стратегии передайте `raise_on_error=True`: это заставляет `fetch_url()` выполнить одну попытку и выбросить классифицированную ошибку. Без этого флага краулер сам применяет повторы и по прежнему возвращает пустую строку при неудаче.
+
+```python
+from src.crawler.errors import NetworkError, TransientError
+from src.crawler.retry_strategy import RetryStrategy
+
+strategy = RetryStrategy(
+    max_retries=3,
+    backoff_factor=2.0,
+    retry_on=[TransientError, NetworkError],
+)
+result = await strategy.execute_with_retry(
+    crawler.fetch_url, "https://example.com", raise_on_error=True,
+)
+```
+
+Статистика доступна через `get_error_stats()`, полный отчёт — через `get_error_report()`. Параметры `connect_timeout`, `read_timeout` и `total_timeout` задают исходные таймауты; каждая повторная попытка увеличивает их в `1.5` раза. Для HTTP `429` пауза удваивается, для HTTP `500` действует предел в два повтора. Circuit breaker пока не включён.
+
 ## Структура проекта
 
 ```text
@@ -72,16 +92,20 @@ project/
 │   └── algorythms/
 │       ├── async_http_client.md
 │       ├── crawl_management.md
+│       ├── error_handling_and_retries.md
 │       ├── html_parsing.md
 │       └── rate_limiting.md
 ├── output/
-│   └── crawl_results.json
+│   ├── crawl_results.json
+│   └── error_report.json
 ├── src/
 │   ├── concurrency/
 │   │   ├── rate_limiter.py
 │   │   └── semaphore_manager.py
 │   ├── crawler/
-│   │   └── async_crawler.py
+│   │   ├── async_crawler.py
+│   │   ├── errors.py
+│   │   └── retry_strategy.py
 │   ├── parsers/
 │   │   ├── html_parser.py
 │   │   └── robots_parser.py
@@ -96,7 +120,9 @@ project/
 │   ├── crawler/
 │   │   ├── test_async_crawler.py
 │   │   ├── test_crawl.py
-│   │   └── test_politeness.py
+│   │   ├── test_day5_errors.py
+│   │   ├── test_politeness.py
+│   │   └── test_retry_strategy.py
 │   ├── parsers/
 │   │   ├── test_html_parser.py
 │   │   └── test_robots_parser.py
@@ -606,7 +632,7 @@ python -m pytest tests/test_main.py -v
 
 Тесты сетевых операций используют локальный HTTP-сервер. Поэтому они не зависят от доступности внешних сайтов и скорости интернет-соединения.
 
-На текущем этапе тестовый набор содержит 139 тестов. Все тесты успешно пройдены; после них проверен запуск `python -m src.main`.
+На текущем этапе тестовый набор содержит 150 тестов. Все тесты успешно пройдены; после них проверен запуск `python -m src.main`.
 
 Тесты четвёртого дня:
 
@@ -617,6 +643,8 @@ python -m pytest tests/concurrency/test_rate_limiter.py tests/parsers/test_robot
 Проверяются отдельные и глобальные лимиты, задержки, jitter, кэширование и парсинг правил, выбор User-Agent, запреты, редиректы, backoff, таймауты, статистика и локальная демонстрация в `main`.
 
 ## Документация алгоритмов
+
+Описание классификации ошибок, повторов и статистики дня 5: [обработка ошибок и повторы](docs/algorythms/error_handling_and_retries.md).
 
 Подробное описание HTTP-клиента:
 
