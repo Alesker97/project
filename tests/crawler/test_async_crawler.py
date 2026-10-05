@@ -13,7 +13,7 @@ from src.concurrency.semaphore_manager import (
 from src.crawler.async_crawler import AsyncCrawler
 
 
-# Тесты дней 1–3 проверяют загрузку и обход без правил вежливости.
+# Эти тесты проверяют загрузку и обход без правил вежливости.
 create_crawler = partial(
     AsyncCrawler,
     requests_per_second=1000.0,
