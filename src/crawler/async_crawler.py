@@ -195,6 +195,9 @@ class AsyncCrawler:
                     current_url = urljoin(current_url, location)
                     continue
                 if status >= 400:
+                    self._page_response_details[url] = self._response_details.get(
+                        current_url, (status, ""),
+                    )
                     error_type = TransientError if status == 429 or status >= 500 else PermanentError
                     raise error_type(f"HTTP {status}", url=url, status=status, content=content)
                 break
@@ -315,11 +318,10 @@ class AsyncCrawler:
                         await response.text(),
                         response.headers.get("Location"),
                     )
-                    if response.status < 400:
-                        self._response_details[url] = (
-                            response.status,
-                            response.headers.get("Content-Type", "").split(";", 1)[0].strip(),
-                        )
+                    self._response_details[url] = (
+                        response.status,
+                        response.headers.get("Content-Type", "").split(";", 1)[0].strip(),
+                    )
         except asyncio.TimeoutError as error:
             raise TransientError("Превышено время ожидания.", url=url) from error
         except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as error:
